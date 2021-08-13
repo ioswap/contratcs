@@ -453,19 +453,19 @@ contract IOSwapPair is IUniswapV2Pair, UniswapV2ERC20 {
 
     // if fee is on, mint liquidity equivalent to 1/6th of the growth in sqrt(k)
     function _mintFee(uint112 _reserve0, uint112 _reserve1) private returns (bool feeOn) {
-        address feeTo = IUniswapV2Factory(factory).feeTo();
+        (, uint _taxRate, address _taxToken, address feeTo) = IOSwapFactory(factory).getTaxTo(token0, token1);
         feeOn = feeTo != address(0);
         uint _kLast = kLast; // gas savings
         if (feeOn) {
-            if (_kLast != 0) {
+            //if (_kLast != 0) {
+            if (_kLast != 0 && _taxToken == address(this)) {
                 uint rootK = Math.sqrt(uint(_reserve0).mul(_reserve1));
                 uint rootKLast = Math.sqrt(_kLast);
                 if (rootK > rootKLast) {
-                    //(, uint _taxRate) = IOSwapFactory(factory).getFeeRate(address(this));
-                    uint numerator = totalSupply.mul(rootK.sub(rootKLast));
-                    //uint numerator = totalSupply.mul(rootK.sub(rootKLast)).mul(_taxRate);
-                    uint denominator = rootK.mul(5).add(rootKLast);
-                    //uint denominator = rootK.mul(uint(1e18).sub(_taxRate)).add(rootKLast.mul(_taxRate));
+                    //uint numerator = totalSupply.mul(rootK.sub(rootKLast));
+                    uint numerator = (totalSupply.mul(_taxRate) / 1e14).mul(rootK.sub(rootKLast));
+                    //uint denominator = rootK.mul(5).add(rootKLast);
+                    uint denominator = rootK.mul(uint(1e18).sub(_taxRate)).add(rootKLast.mul(_taxRate)) / 1e14;
                     uint liquidity = numerator / denominator;
                     if (liquidity > 0) _mint(feeTo, liquidity);
                 }
@@ -545,14 +545,27 @@ contract IOSwapPair is IUniswapV2Pair, UniswapV2ERC20 {
         uint amount0In = balance0 > _reserve0 - amount0Out ? balance0 - (_reserve0 - amount0Out) : 0;
         uint amount1In = balance1 > _reserve1 - amount1Out ? balance1 - (_reserve1 - amount1Out) : 0;
         require(amount0In > 0 || amount1In > 0, 'UniswapV2: INSUFFICIENT_INPUT_AMOUNT');
+        { // scope for _feeRate, _taxRate, _taxToken, _taxTo avoids stack too deep errors
+        (uint _feeRate, uint _taxRate, address _taxToken, address _taxTo) = IOSwapFactory(factory).getTaxTo(token0, token1);
         { // scope for reserve{0,1}Adjusted, avoids stack too deep errors
-        (uint _feeRate, ) = IOSwapFactory(factory).getFeeRate(address(this));
         //uint balance0Adjusted = balance0.mul(1000).sub(amount0In.mul(3));
-        uint balance0Adjusted = balance0.mul(1e18).sub(amount0In.mul(_feeRate));
+        uint balance0Adjusted = balance0.mul(1e18).sub(amount0In.mul(_feeRate)) / 1e14;
         //uint balance1Adjusted = balance1.mul(1000).sub(amount1In.mul(3));
-        uint balance1Adjusted = balance1.mul(1e18).sub(amount1In.mul(_feeRate));
+        uint balance1Adjusted = balance1.mul(1e18).sub(amount1In.mul(_feeRate)) / 1e14;
         //require(balance0Adjusted.mul(balance1Adjusted) >= uint(_reserve0).mul(_reserve1).mul(1000**2), 'UniswapV2: K');
-        require(balance0Adjusted.mul(balance1Adjusted) >= uint(_reserve0).mul(_reserve1).mul(1e36), 'UniswapV2: K');
+        require(balance0Adjusted.mul(balance1Adjusted) >= uint(_reserve0).mul(_reserve1).mul(1e8), 'UniswapV2: K');
+        }
+        if(_taxToken == token0) {
+            uint tax = (amount0In + amount0Out);
+            tax = (tax.mul(_feeRate) / 1e18).mul(_taxRate) / 1e18;
+            _safeTransfer(token0, _taxTo, tax);
+            balance0 = balance0.sub(tax);
+        } else if(_taxToken == token1) {
+            uint tax = amount1In + amount1Out;
+            tax = (tax.mul(_feeRate) / 1e18).mul(_taxRate) / 1e18;
+            _safeTransfer(token1, _taxTo, tax);
+            balance1 = balance1.sub(tax);
+        }
         }
 
         _update(balance0, balance1, _reserve0, _reserve1);
@@ -592,6 +605,8 @@ contract IOSwapFactory is IUniswapV2Factory {
     
     mapping(address => uint) public feeRate;
     mapping(address => uint) public taxRate;
+    mapping(address => uint) public taxPriority;
+    mapping(address => address) public taxTo;
 
     event PairCreated(address indexed token0, address indexed token1, address pair, uint);
 
@@ -624,18 +639,39 @@ contract IOSwapFactory is IUniswapV2Factory {
         emit PairCreated(token0, token1, pair, allPairs.length);
     }
 
-    function setFeeTo(address _feeTo) external {
-        require(msg.sender == feeToSetter, 'UniswapV2: FORBIDDEN');
-        feeTo = _feeTo;
+    // bytes32(uint256(keccak256('eip1967.proxy.admin')) - 1)
+    bytes32 internal constant ADMIN_SLOT = 0xb53127684a568b3173ae13b9f8a6016e243e63b6e8ee1178d6a717850b5d6103;
+
+    function _admin() internal view returns (address adm) {
+        bytes32 slot = ADMIN_SLOT;
+        assembly {
+            adm := sload(slot)
+        }
+    }
+    
+    modifier onlySetter() {
+        require(msg.sender == feeToSetter || msg.sender == _admin(), 'FORBIDDEN');
+        _;
     }
 
-    function setFeeToSetter(address _feeToSetter) external {
-        require(msg.sender == feeToSetter, 'UniswapV2: FORBIDDEN');
+    function setProductImplementation(address _productImplementation) external onlySetter {
+        productImplementation = _productImplementation;
+    }
+
+    function setFeeTo(address _feeTo) external onlySetter {
+        feeTo = _feeTo;
+    }
+    
+    function setTaxTo(address _taxToken, address _taxTo, uint _taxPriority) external onlySetter {
+        taxTo[_taxToken] = _taxTo;
+        taxPriority[_taxToken] = _taxPriority;
+    }
+    
+    function setFeeToSetter(address _feeToSetter) external onlySetter {
         feeToSetter = _feeToSetter;
     }
     
-    function setFeeRate(address pair, uint _feeRate, uint _taxRate) external {
-        require(msg.sender == feeToSetter, 'UniswapV2: FORBIDDEN');
+    function setFeeRate(address pair, uint _feeRate, uint _taxRate) external onlySetter {
         feeRate[pair] = _feeRate;
         taxRate[pair] = _taxRate;
     }
@@ -649,11 +685,16 @@ contract IOSwapFactory is IUniswapV2Factory {
             _taxRate = taxRate[address(0)];
     }
     
-    function setProductImplementation(address _productImplementation) public {
-        require(msg.sender == feeToSetter, 'UniswapV2: FORBIDDEN');
-        productImplementation = _productImplementation;
+    function getTaxTo(address token0, address token1) public view returns (uint _feeRate, uint _taxRate, address _taxToken, address _taxTo) {
+        address pair = getPair[token0][token1];
+        (_feeRate, _taxRate) = getFeeRate(pair);
+        (uint priority0, uint priority1) = (taxPriority[token0], taxPriority[token1]);
+        _taxToken = priority0 > priority1 ? token0 : priority0 < priority1 ? token1 : pair;
+        _taxTo = taxTo[_taxToken];
+        if(_taxTo == address(0))
+            _taxTo = feeTo;
     }
-
+    
     // returns sorted token addresses, used to handle return values from pairs sorted in this order
     function sortTokens(address tokenA, address tokenB) public pure returns (address token0, address token1) {
         require(tokenA != tokenB, 'IOSwapFactory: IDENTICAL_ADDRESSES');
@@ -699,10 +740,10 @@ contract IOSwapFactory is IUniswapV2Factory {
         require(reserveIn > 0 && reserveOut > 0, 'IOSwapFactory: INSUFFICIENT_LIQUIDITY');
         (uint _feeRate, ) = getFeeRate(pair);
         //uint amountInWithFee = amountIn.mul(997);
-        uint amountInWithFee = amountIn.mul(uint(1e18).sub(_feeRate));
+        uint amountInWithFee = amountIn.mul(uint(1e18).sub(_feeRate)) / 1e14;
         uint numerator = amountInWithFee.mul(reserveOut);
         //uint denominator = reserveIn.mul(1000).add(amountInWithFee);
-        uint denominator = reserveIn.mul(1e18).add(amountInWithFee);
+        uint denominator = reserveIn.mul(1e4).add(amountInWithFee);
         amountOut = numerator / denominator;
     }
     function getAmountOut(uint amountIn, uint reserveIn, uint reserveOut) public view returns (uint amountOut) {
@@ -715,9 +756,9 @@ contract IOSwapFactory is IUniswapV2Factory {
         require(reserveIn > 0 && reserveOut > 0, 'IOSwapFactory: INSUFFICIENT_LIQUIDITY');
         (uint _feeRate, ) = getFeeRate(pair);
         //uint numerator = reserveIn.mul(amountOut).mul(1000);
-        uint numerator = reserveIn.mul(amountOut).mul(1e18);
+        uint numerator = reserveIn.mul(amountOut).mul(1e4);
         //uint denominator = reserveOut.sub(amountOut).mul(997);
-        uint denominator = reserveOut.sub(amountOut).mul(uint(1e18).sub(_feeRate));
+        uint denominator = reserveOut.sub(amountOut).mul(uint(1e18).sub(_feeRate)) / 1e14;
         amountIn = (numerator / denominator).add(1);
     }
     function getAmountIn(uint amountOut, uint reserveIn, uint reserveOut) public view returns (uint amountIn) {
@@ -747,7 +788,7 @@ contract IOSwapFactory is IUniswapV2Factory {
     }
 
     // Reserved storage space to allow for layout changes in the future.
-    uint256[48] private ______gap;
+    uint256[46] private ______gap;
 }
 
 
