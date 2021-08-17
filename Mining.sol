@@ -267,11 +267,19 @@ contract StakingPool is Configurable, StakingRewards {
         config[_rewards2Begin_] = _begin;
     }
 
+    function rewardQuota() public view returns (uint amt) {
+        address mine = rewardsDistribution == address(0) ? address(this) : rewardsDistribution;
+        amt = rewardsToken.balanceOf(mine);
+        if(mine != address(this))
+            amt = Math.min(rewardsToken.allowance(mine, address(this)), amt);
+        amt = amt.sub0(rewards[address(0)]);
+    }
+    
     function rewardDelta() public view returns (uint amt) {
         if(begin == 0 || begin >= now || lastUpdateTime >= now)
             return 0;
             
-        amt = Math.min(rewardsToken.allowance(rewardsDistribution, address(this)), rewardsToken.balanceOf(rewardsDistribution)).sub0(rewards[address(0)]);
+        amt = rewardQuota();
         
         // calc rewardDelta in period
         if(lep == 3) {                                                              // power
@@ -302,8 +310,8 @@ contract StakingPool is Configurable, StakingRewards {
             );
     }
 
-    function earned(address account) virtual override public view returns (uint256) {
-        return Math.min(Math.min(super.earned(account), rewardsToken.allowance(rewardsDistribution, address(this))), rewardsToken.balanceOf(rewardsDistribution));
+    function earned(address account) virtual override public view returns (uint256 amt) {
+        return Math.min(super.earned(account), rewardQuota());
 	}    
 	
     modifier updateReward(address account) override {
@@ -339,7 +347,10 @@ contract StakingPool is Configurable, StakingRewards {
         if (reward > 0) {
             rewards[acct] = 0;
             rewards[address(0)] = rewards[address(0)].sub0(reward);
-            rewardsToken.safeTransferFrom(rewardsDistribution, acct, reward);
+            if(rewardsDistribution == address(this) || rewardsDistribution == address(0))
+                rewardsToken.safeTransfer(acct, reward);
+            else
+                rewardsToken.safeTransferFrom(rewardsDistribution, acct, reward);
             emit RewardPaid(acct, reward);
             
             if(config[_rewards2Token_] != 0 && config[_rewards2Begin_] <= now) {
@@ -422,7 +433,7 @@ contract StakingPool is Configurable, StakingRewards {
     }
     
     function APY() virtual public view returns (uint) {
-        uint amt = rewardsToken.allowance(rewardsDistribution, address(this)).sub0(rewards[address(0)]);
+        uint amt = rewardQuota();
         
         if(lep == 3) {                                                              // power
             uint amt2 = amt.mul(365 days).mul(now.add(rewardsDuration).sub(begin)).div(now.add(1).add(rewardsDuration).sub(begin));
@@ -918,6 +929,7 @@ contract Mine is Governable {
     using SafeERC20 for IERC20;
 
     address public reward;
+    mapping (bytes32 => address) public productImplementations;
 
     function __Mine_init(address governor, address reward_) public initializer {
         __Governable_init_unchained(governor);
@@ -935,7 +947,11 @@ contract Mine is Governable {
     function approveToken(address token, address pool, uint amount) public governance {
         IERC20(token).approve(pool, amount);
     }
+    
+    function setProductImplementation(bytes32 name, address logic) public governance {
+        productImplementations[name] = logic;
+    }
 
     // Reserved storage space to allow for layout changes in the future.
-    uint256[50] private ______gap;
+    uint256[49] private ______gap;
 }
