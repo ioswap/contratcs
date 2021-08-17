@@ -1578,10 +1578,8 @@ contract IOSwapFarmingRouter is IOSwapRouter02 {
         rewardsDuration[_taxToken] = _span;
         begin[_taxToken]           = _begin;
         periodFinish[_taxToken]    = _begin.add(_span);
-        //if(rewardsBuffer[taxToken] == 0)
-            rewardsBuffer[_taxToken]   = rewardQuota().mul(_period).div(_span);
-        if(lastUpdateTime[_taxToken] == 0)
-            lastUpdateTime[_taxToken] = _begin;
+        rewardsBuffer[_taxToken]   = rewardQuota().mul(_period).div(_span);
+        lastUpdateTime[_taxToken] = _begin;
     }
     
     function _swap(uint[] memory amounts, address[] memory path, address _to) internal {
@@ -1597,44 +1595,36 @@ contract IOSwapFarmingRouter is IOSwapRouter02 {
             _swapFarming(input, amountIn, rate);
         else if(output == taxToken)
             _swapFarming(output, amountOut, rate);
-
     }
 
     function _swapFarming(address taxToken, uint amount, uint rate) internal {
         if(begin[taxToken] == 0 || begin[taxToken] >= now || lastUpdateTime[taxToken] >= now)
             return;
-        //if(taxToken != currency) {
-        //    address[] memory path = new address[](2);
-        //    path[0] = taxToken;
-        //    path[1] = currency;
-        //    amount = _swapValue(amount, path);
+        //uint tax = amount.mul(rate).div(1e18);
+        //
+        //if(now < begin[taxToken].add(period[taxToken])) {
+        //    uint temp = taxsBuffer[taxToken].mul(lastUpdateTime[taxToken].sub(begin[taxToken])).div(period[taxToken]).add(tax);
+        //    taxsBuffer[taxToken] = temp.mul(period[taxToken].add(now).sub(lastUpdateTime[taxToken])).div(now.sub(begin[taxToken]));
+        //} else
+        //    taxsBuffer[taxToken] = taxsBuffer[taxToken].add(tax);
+        //rewardsBuffer[taxToken] = rewardsBuffer[taxToken].add(rewardDelta(taxToken));
+        //uint reward = rewardsBuffer[taxToken].mul(tax).div(taxsBuffer[taxToken]);
+        //taxsBuffer[taxToken] = taxsBuffer[taxToken].mul(period[taxToken]).div(period[taxToken].add(now).sub(lastUpdateTime[taxToken]));
+        //rewardsBuffer[taxToken] = rewardsBuffer[taxToken].sub(reward);
+        
+        //rewards[address(0)][address(0)] = rewards[address(0)][address(0)].add(reward);
+        //if(ecoAddr != address(0)) {
+        //    uint eco = reward.mul(ecoRatio).div(1e18);
+        //    rewards[ecoAddr][taxToken] = rewards[ecoAddr][taxToken].add(eco);
+        //    reward = reward.sub(eco);
         //}
-        uint tax = amount.mul(rate).div(1e18);
+        //rewards[msg.sender][taxToken] = rewards[msg.sender][taxToken].add(reward);
         
-        //if(now < begin.add(period))
-        //    taxsBuffer = taxsBuffer.mul(lastUpdateTime.sub(begin)).div(period).add(tax).mul(period).div(now.sub(begin));
-        //else
-        //    taxsBuffer = taxsBuffer.add(tax).mul(period).div(period.add(now).sub(lastUpdateTime));
-        //rewardsBuffer = rewardsBuffer.add(rewardDelta());
-        //uint reward = tax < taxsBuffer ? rewardsBuffer.mul(tax).div(taxsBuffer) : rewardsBuffer;
-        //rewardsBuffer = rewardsBuffer.sub(reward);
-        
-        if(now < begin[taxToken].add(period[taxToken])) {
-            uint temp = taxsBuffer[taxToken].mul(lastUpdateTime[taxToken].sub(begin[taxToken])).div(period[taxToken]).add(tax);
-            taxsBuffer[taxToken] = temp.mul(period[taxToken].add(now).sub(lastUpdateTime[taxToken])).div(now.sub(begin[taxToken]));
-        } else
-            taxsBuffer[taxToken] = taxsBuffer[taxToken].add(tax);
-        rewardsBuffer[taxToken] = rewardsBuffer[taxToken].add(rewardDelta(taxToken));
-        uint reward = rewardsBuffer[taxToken].mul(tax).div(taxsBuffer[taxToken]);
-        taxsBuffer[taxToken] = taxsBuffer[taxToken].mul(period[taxToken]).div(period[taxToken].add(now).sub(lastUpdateTime[taxToken]));
-        rewardsBuffer[taxToken] = rewardsBuffer[taxToken].sub(reward);
-        
-        rewards[address(0)][address(0)] = rewards[address(0)][address(0)].add(reward);
-        if(ecoAddr != address(0)) {
-            uint eco = reward.mul(ecoRatio).div(1e18);
-            rewards[ecoAddr][taxToken] = rewards[ecoAddr][taxToken].add(eco);
-            reward = reward.sub(eco);
-        }
+        uint reward;    uint rwdEco;    uint tax;
+        (reward, rwdEco, rewardsBuffer[taxToken], taxsBuffer[taxToken], tax) = _swapFarmingable(taxToken, amount, rate);
+
+        rewards[address(0)][address(0)] = rewards[address(0)][address(0)].add(reward.add(rwdEco));
+        rewards[ecoAddr][taxToken] = rewards[ecoAddr][taxToken].add(rwdEco);
         rewards[msg.sender][taxToken] = rewards[msg.sender][taxToken].add(reward);
         
         swapAmounts[msg.sender][taxToken] = swapAmounts[msg.sender][taxToken].add(amount);
@@ -1645,14 +1635,33 @@ contract IOSwapFarmingRouter is IOSwapRouter02 {
         emit SwapFarming(msg.sender, taxToken, amount, tax, reward);
     }
     event SwapFarming(address sender, address taxToken, uint amount, uint tax, uint reward);
-
-    //function _swapValue(uint vol, address[] memory path) internal view returns (uint v) {
-    //    v = vol;
-    //    for(uint i=0; i<path.length-1; i++) {
-    //        (uint reserve0, uint reserve1,) = IUniswapV2Pair(IUniswapV2Factory(factory).getPair(path[i], path[i+1])).getReserves();
-    //        v =  path[i+1] < path[i] ? v.mul(reserve0) / reserve1 : v.mul(reserve1) / reserve0;
-    //    }
-    //}
+    
+    function _swapFarmingable(address taxToken, uint amount, uint rate) internal view returns (uint reward, uint rwdEco, uint rwdsBuf, uint taxsBuf, uint tax) {
+        if(begin[taxToken] == 0 || begin[taxToken] >= now || lastUpdateTime[taxToken] >= now)
+            return (0, 0, 0, 0, 0);
+        tax = amount.mul(rate).div(1e18);
+        
+        if(now < begin[taxToken].add(period[taxToken])) {
+            taxsBuf = taxsBuffer[taxToken].mul(lastUpdateTime[taxToken].sub(begin[taxToken]));
+            taxsBuf = taxsBuf.div(period[taxToken]).add(tax);
+            taxsBuf = taxsBuf.mul(period[taxToken].add(now).sub(lastUpdateTime[taxToken]));
+            taxsBuf = taxsBuf.div(now.sub(begin[taxToken]));
+        } else
+            taxsBuf = taxsBuffer[taxToken].add(tax);
+        rwdsBuf = rewardsBuffer[taxToken].add(rewardDelta(taxToken));
+        reward = rwdsBuf.mul(tax).div(taxsBuf);
+        taxsBuf = taxsBuf.mul(period[taxToken]).div(period[taxToken].add(now).sub(lastUpdateTime[taxToken]));
+        rwdsBuf = rwdsBuf.sub(reward);
+        
+        if(ecoAddr != address(0)) {
+            rwdEco = reward.mul(ecoRatio).div(1e18);
+            reward = reward.sub(rwdEco);
+        }
+    }
+    
+    function swapFarmingable(address taxToken, uint amount) external view returns (uint reward) {
+        (reward, , , , ) = _swapFarmingable(taxToken, amount, IOSwapFactory(factory).feeRate(address(0)));
+    }
     
     function rewardQuota() public view returns (uint) {
         return Math.min(rewardsToken.allowance(rewardsDistribution, address(this)), rewardsToken.balanceOf(rewardsDistribution)).sub0(rewards[address(0)][address(0)]);
