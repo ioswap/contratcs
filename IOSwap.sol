@@ -650,8 +650,12 @@ contract IOSwapFactory is IUniswapV2Factory {
     }
     
     modifier onlySetter() {
-        require(msg.sender == feeToSetter || msg.sender == _admin(), 'FORBIDDEN');
+        require(isSetter(msg.sender), 'FORBIDDEN');
         _;
+    }
+    
+    function isSetter(address sender) public view returns (bool) {
+        return sender == feeToSetter || sender == _admin();
     }
 
     function setProductImplementation(address _productImplementation) external onlySetter {
@@ -875,8 +879,16 @@ library SafeMath {
         require((z = x - y) <= x, 'ds-math-sub-underflow');
     }
 
+    function sub0(uint256 a, uint256 b) internal pure returns (uint256) {
+        return a > b ? a - b : 0;
+    }
+
     function mul(uint x, uint y) internal pure returns (uint z) {
         require(y == 0 || (z = x * y) / y == x, 'ds-math-mul-overflow');
+    }
+    
+    function div(uint x, uint y) internal pure returns (uint z) {
+        return x / y;
     }
 }
 
@@ -1079,7 +1091,7 @@ contract IOSwapRouter02 is IUniswapV2Router01, IUniswapV2Router02, Initializable
     //    initialize(_factory, _WETH);
     //}
     
-    function initialize(address _factory, address _WETH) public initializer {
+    function __IOSwapRouter02_init(address _factory, address _WETH) public initializer {
         factory = _factory;
         WETH = _WETH;
     }
@@ -1505,6 +1517,191 @@ contract IOSwapRouter02 is IUniswapV2Router01, IUniswapV2Router02, Initializable
     {
         return UniswapV2Library.getAmountsIn(factory, amountOut, path);
     }
+
+    // Reserved storage space to allow for layout changes in the future.
+    uint256[50] private ______gap;
+}
+
+contract IOSwapFarmingRouter is IOSwapRouter02 {
+    using TransferHelper for address;
+    
+    address public rewardsDistribution;
+    IERC20 public rewardsToken;     // IOS
+    address public currency;        // obsolete
+    address internal ecoAddr;
+    uint internal ecoRatio;
+
+	mapping (address => uint) public lep;                // 1: linear, 2: exponential, 3: power
+	mapping (address => uint) public period;
+	mapping (address => uint) public begin;
+    mapping (address => uint) public rewardsDuration;
+    mapping (address => uint) public periodFinish;
+    mapping (address => uint) public taxsBuffer;
+    mapping (address => uint) public rewardsBuffer;
+    mapping (address => uint) public lastUpdateTime;                        // taxToken => 
+
+    mapping (address => mapping (address => uint)) public swapAmounts;      // account => taxToken =>
+    mapping (address => mapping (address => uint)) public swapTaxs;   
+    mapping (address => mapping (address => uint)) public rewards;
+    mapping (address => mapping (address => uint)) public paid;
+
+    modifier onlySetter() {
+        require(IOSwapFactory(factory).isSetter(msg.sender), 'FORBIDDEN');
+        _;
+    }
+
+    function __IOSwapFarmingRouter_init(
+        address _factory, 
+        address _WETH,
+        address _rewardsDistribution,
+        address _rewardsToken,
+        address _ecoAddr
+    ) public initializer {
+        __IOSwapRouter02_init(_factory, _WETH);
+        __IOSwapFarmingRouter_init_unchained(_rewardsDistribution, _rewardsToken, _ecoAddr);
+    }
+
+    function __IOSwapFarmingRouter_init_unchained(
+        address _rewardsDistribution,
+        address _rewardsToken,
+        address _ecoAddr
+    ) public onlySetter {
+        rewardsToken = IERC20(_rewardsToken);
+        rewardsDistribution = _rewardsDistribution;
+        ecoAddr = _ecoAddr;
+        ecoRatio = 0.10 ether;
+    }
+
+    function notifyRewardBegin(address _taxToken, uint _lep, uint _period, uint _span, uint _begin) public onlySetter {
+        lep[_taxToken]             = _lep;         // 1: linear, 2: exponential, 3: power
+        period[_taxToken]          = _period;
+        rewardsDuration[_taxToken] = _span;
+        begin[_taxToken]           = _begin;
+        periodFinish[_taxToken]    = _begin.add(_span);
+        //if(rewardsBuffer[taxToken] == 0)
+            rewardsBuffer[_taxToken]   = rewardQuota().mul(_period).div(_span);
+        if(lastUpdateTime[_taxToken] == 0)
+            lastUpdateTime[_taxToken] = _begin;
+    }
+    
+    function _swap(uint[] memory amounts, address[] memory path, address _to) internal {
+        super._swap(amounts, path, _to);
+        for(uint i=0; i<amounts.length-1; i++)
+            _swapFarming(path[i], path[i+1], amounts[i], amounts[i+1]);
+    }
+    
+    function _swapFarming(address input, address output, uint amountIn, uint amountOut) internal {
+        (uint feeRate, uint taxRate, address taxToken, ) = IOSwapFactory(factory).getTaxTo(input, output);
+        uint rate = feeRate.mul(taxRate) / 1e18;
+        if(input == taxToken)
+            _swapFarming(input, amountIn, rate);
+        else if(output == taxToken)
+            _swapFarming(output, amountOut, rate);
+
+    }
+
+    function _swapFarming(address taxToken, uint amount, uint rate) internal {
+        if(begin[taxToken] == 0 || begin[taxToken] >= now || lastUpdateTime[taxToken] >= now)
+            return;
+        //if(taxToken != currency) {
+        //    address[] memory path = new address[](2);
+        //    path[0] = taxToken;
+        //    path[1] = currency;
+        //    amount = _swapValue(amount, path);
+        //}
+        uint tax = amount.mul(rate).div(1e18);
+        
+        //if(now < begin.add(period))
+        //    taxsBuffer = taxsBuffer.mul(lastUpdateTime.sub(begin)).div(period).add(tax).mul(period).div(now.sub(begin));
+        //else
+        //    taxsBuffer = taxsBuffer.add(tax).mul(period).div(period.add(now).sub(lastUpdateTime));
+        //rewardsBuffer = rewardsBuffer.add(rewardDelta());
+        //uint reward = tax < taxsBuffer ? rewardsBuffer.mul(tax).div(taxsBuffer) : rewardsBuffer;
+        //rewardsBuffer = rewardsBuffer.sub(reward);
+        
+        if(now < begin[taxToken].add(period[taxToken])) {
+            uint temp = taxsBuffer[taxToken].mul(lastUpdateTime[taxToken].sub(begin[taxToken])).div(period[taxToken]).add(tax);
+            taxsBuffer[taxToken] = temp.mul(period[taxToken].add(now).sub(lastUpdateTime[taxToken])).div(now.sub(begin[taxToken]));
+        } else
+            taxsBuffer[taxToken] = taxsBuffer[taxToken].add(tax);
+        rewardsBuffer[taxToken] = rewardsBuffer[taxToken].add(rewardDelta(taxToken));
+        uint reward = rewardsBuffer[taxToken].mul(tax).div(taxsBuffer[taxToken]);
+        taxsBuffer[taxToken] = taxsBuffer[taxToken].mul(period[taxToken]).div(period[taxToken].add(now).sub(lastUpdateTime[taxToken]));
+        rewardsBuffer[taxToken] = rewardsBuffer[taxToken].sub(reward);
+        
+        rewards[address(0)][address(0)] = rewards[address(0)][address(0)].add(reward);
+        if(ecoAddr != address(0)) {
+            uint eco = reward.mul(ecoRatio).div(1e18);
+            rewards[ecoAddr][taxToken] = rewards[ecoAddr][taxToken].add(eco);
+            reward = reward.sub(eco);
+        }
+        rewards[msg.sender][taxToken] = rewards[msg.sender][taxToken].add(reward);
+        
+        swapAmounts[msg.sender][taxToken] = swapAmounts[msg.sender][taxToken].add(amount);
+        swapAmounts[address(0)][taxToken] = swapAmounts[address(0)][taxToken].add(amount);
+        swapTaxs[msg.sender][taxToken] = swapTaxs[msg.sender][taxToken].add(tax);
+        swapTaxs[address(0)][taxToken] = swapTaxs[address(0)][taxToken].add(tax);
+        lastUpdateTime[taxToken] = now;
+        emit SwapFarming(msg.sender, taxToken, amount, tax, reward);
+    }
+    event SwapFarming(address sender, address taxToken, uint amount, uint tax, uint reward);
+
+    //function _swapValue(uint vol, address[] memory path) internal view returns (uint v) {
+    //    v = vol;
+    //    for(uint i=0; i<path.length-1; i++) {
+    //        (uint reserve0, uint reserve1,) = IUniswapV2Pair(IUniswapV2Factory(factory).getPair(path[i], path[i+1])).getReserves();
+    //        v =  path[i+1] < path[i] ? v.mul(reserve0) / reserve1 : v.mul(reserve1) / reserve0;
+    //    }
+    //}
+    
+    function rewardQuota() public view returns (uint) {
+        return Math.min(rewardsToken.allowance(rewardsDistribution, address(this)), rewardsToken.balanceOf(rewardsDistribution)).sub0(rewards[address(0)][address(0)]);
+    }
+    
+    function rewardDelta(address taxToken) public view returns (uint amt) {
+        if(begin[taxToken] == 0 || begin[taxToken] >= now || lastUpdateTime[taxToken] >= now)
+            return 0;
+            
+        amt = rewardQuota();
+        
+        // calc rewardDelta in period
+        if(lep[taxToken] == 3) {                                                              // power
+            //uint y = period.mul(1 ether).div(lastUpdateTime.add(rewardsDuration).sub(begin));
+            //uint amt1 = amt.mul(1 ether).div(y);
+            //uint amt2 = amt1.mul(period).div(now.add(rewardsDuration).sub(begin));
+            uint amt2 = amt.mul(lastUpdateTime[taxToken].add(rewardsDuration[taxToken]).sub(begin[taxToken])).div(now.add(rewardsDuration[taxToken]).sub(begin[taxToken]));
+            amt = amt.sub(amt2);
+        } else if(lep[taxToken] == 2) {                                                       // exponential
+            if(now.sub(lastUpdateTime[taxToken]) < rewardsDuration[taxToken])
+                amt = amt.mul(now.sub(lastUpdateTime[taxToken])).div(rewardsDuration[taxToken]);
+        }else if(now < periodFinish[taxToken])                                                // linear
+            amt = amt.mul(now.sub(lastUpdateTime[taxToken])).div(periodFinish[taxToken].sub(lastUpdateTime[taxToken]));
+        else if(lastUpdateTime[taxToken] >= periodFinish[taxToken])
+            amt = 0;
+            
+        //if(ecoAddr != 0)
+        //    amt = amt.mul(uint(1e18).sub(ecoRatio)).div(1 ether);
+    }
+    
+    function earned(address account, address taxToken) public view returns (uint) {
+        return rewards[account][taxToken];
+    }
+
+    function getReward(address taxToken) public {
+        uint reward = rewards[msg.sender][taxToken];
+        if (reward > 0) {
+            rewards[msg.sender][taxToken] = 0;
+            rewards[address(0)][address(0)] = rewards[address(0)][address(0)].sub0(reward);
+            paid[msg.sender][taxToken] = paid[msg.sender][taxToken].add(reward);
+            paid[address(0)][taxToken] = paid[address(0)][taxToken].add(reward);
+            address(rewardsToken).safeTransferFrom(rewardsDistribution, msg.sender, reward);
+            emit RewardPaid(msg.sender, taxToken, reward);
+        }
+    }
+    event RewardPaid(address indexed user, address taxToken, uint256 reward);
+
+    // Reserved storage space to allow for layout changes in the future.
+    uint256[50] private ______gap;
 }
 
 library UniswapV2Library {
@@ -1648,7 +1845,7 @@ contract DeployRouter {
         require(WETH != address(0), 'IOSwapFactoryFactory: WETH address is 0x0');
 
         IOSwapRouter02 router = new IOSwapRouter02();
-        router.initialize(address(factoryProxy), WETH);
+        router.__IOSwapRouter02_init(address(factoryProxy), WETH);
         emit Deploy('IOSwapRouter02', address(router));
         
         InitializableAdminUpgradeabilityProxy routerProxy = new InitializableAdminUpgradeabilityProxy();
