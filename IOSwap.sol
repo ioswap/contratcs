@@ -1711,18 +1711,26 @@ contract IOSwapFarmingRouter is IOSwapRouter02 {
     }
 
     function getReward(address taxToken) public {
-        uint reward = rewards[msg.sender][taxToken];
+        getRewardA(msg.sender, taxToken);
+    }
+    function getRewardA(address payable acct, address taxToken) public {
+        uint reward = rewards[acct][taxToken];
         if (reward > 0) {
-            rewards[msg.sender][taxToken] = 0;
+            rewards[acct][taxToken] = 0;
             rewards[address(0)][address(0)] = rewards[address(0)][address(0)].sub0(reward);
-            paid[msg.sender][taxToken] = paid[msg.sender][taxToken].add(reward);
+            paid[acct][taxToken] = paid[acct][taxToken].add(reward);
             paid[address(0)][taxToken] = paid[address(0)][taxToken].add(reward);
-            address(rewardsToken).safeTransferFrom(rewardsDistribution, msg.sender, reward);
-            emit RewardPaid(msg.sender, taxToken, reward);
+            address(rewardsToken).safeTransferFrom(rewardsDistribution, acct, reward);
+            emit RewardPaid(acct, taxToken, reward);
         }
     }
     event RewardPaid(address indexed user, address taxToken, uint256 reward);
 
+    function getRewardAs(address payable acct, address[] calldata taxTokens) external {
+        for(uint i=0; i<taxTokens.length; i++)
+            getRewardA(acct, taxTokens[i]);
+    }
+    
     // Reserved storage space to allow for layout changes in the future.
     uint256[50] private ______gap;
 }
