@@ -1663,6 +1663,20 @@ contract IOSwapFarmingRouter is IOSwapRouter02 {
         (reward, , , , ) = _swapFarmingable(taxToken, amount, IOSwapFactory(factory).feeRate(address(0)));
     }
     
+    function swapFarmingablePath(uint amountIn, address[] calldata path) external view returns (uint reward) {
+        uint[] memory amounts = UniswapV2Library.getAmountsOut(factory, amountIn, path);
+        for(uint i=0; i<amounts.length-1; i++) {
+            (uint feeRate, uint taxRate, address taxToken, ) = IOSwapFactory(factory).getTaxTo(path[i], path[i+1]);
+            uint rate = feeRate.mul(taxRate) / 1e18;
+            uint rwd = 0;
+            if(path[i] == taxToken)
+                (rwd, , , , ) = _swapFarmingable(path[i], amounts[i], rate);
+            else if(path[i+1] == taxToken)
+                (rwd, , , , ) = _swapFarmingable(path[i+1], amounts[i+1], rate);
+            reward = reward.add(rwd);
+        }
+    }
+    
     function rewardQuota() public view returns (uint) {
         return Math.min(rewardsToken.allowance(rewardsDistribution, address(this)), rewardsToken.balanceOf(rewardsDistribution)).sub0(rewards[address(0)][address(0)]);
     }
